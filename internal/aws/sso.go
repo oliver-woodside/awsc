@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 
@@ -289,8 +290,17 @@ func (s *SSOManager) handleAccountRoleSelection(ctx context.Context, accessToken
 	_ = awscconfig.CleanupStaleSessions()
 
 	fmt.Printf("\nSuccessfully authenticated to %s (%s) as %s\n", *selectedAccount.AccountName, *selectedAccount.AccountId, *selectedRole.RoleName)
-	fmt.Printf("\nTo use in this terminal:\n")
-	fmt.Printf("export AWS_PROFILE=%s\n", profileName)
-	fmt.Printf("export AWS_REGION=%s\n", viper.GetString("default_region"))
+
+	exportCmds := fmt.Sprintf("export AWS_PROFILE=%s\nexport AWS_REGION=%s", profileName, viper.GetString("default_region"))
+
+	// Copy to clipboard using xclip
+	clipCmd := exec.Command("xclip", "-selection", "clipboard")
+	clipCmd.Stdin = strings.NewReader(exportCmds)
+	if err := clipCmd.Run(); err != nil {
+		fmt.Printf("\n%s\n", exportCmds)
+		fmt.Printf("\n(Could not copy to clipboard: %v)\n", err)
+	} else {
+		fmt.Printf("\nCopied to clipboard:\n%s\n", exportCmds)
+	}
 	return nil
 }
