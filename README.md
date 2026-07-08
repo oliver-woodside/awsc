@@ -23,6 +23,44 @@ A CLI tool for AWS SSO authentication, RDS port forwarding, EC2 sessions, and Se
   - macOS: `brew install --cask session-manager-plugin`
   - Linux: Download from AWS and install .deb package
 
+## Installation
+
+### Homebrew (macOS & Linux)
+
+Available from the [`blontic/homebrew-tap`](https://github.com/blontic/homebrew-tap) tap:
+
+```bash
+brew install blontic/tap/awsc
+brew upgrade --cask awsc
+```
+
+> Distributed as a Homebrew Cask. The install strips the macOS quarantine flag so the unsigned binary runs without a Gatekeeper prompt.
+
+### Install script (macOS & Linux)
+
+For systems without Homebrew. Downloads the correct binary for your OS/architecture, verifies its checksum, and installs it to a directory on your `PATH`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/blontic/awsc/main/install.sh | sh
+```
+
+Options:
+
+- `AWSC_VERSION=v0.4.1` — install a specific release instead of the latest.
+- `AWSC_INSTALL_DIR=~/.local/bin` — install somewhere you own (no `sudo` needed).
+
+**Updating:** re-run the same command — it installs the latest release over the existing one.
+
+### Build from source
+
+Requires Go (see `go.mod` for the version). Produces `./awsc`:
+
+```bash
+make build
+```
+
+Alternatively, download an archive for your platform from the [latest release](https://github.com/blontic/awsc/releases/latest), extract it, and move the `awsc` binary onto your `PATH`.
+
 ## Setup
 
 ```bash
@@ -33,72 +71,48 @@ A CLI tool for AWS SSO authentication, RDS port forwarding, EC2 sessions, and Se
 ./awsc login
 ```
 
+## Shell Completions
+
+When installed via Homebrew, shell completions (bash, zsh, fish) are set up automatically.
+
+For the install script or build-from-source, load them with `awsc completion <shell>`. For example:
+
+```bash
+# zsh (current shell)
+source <(awsc completion zsh)
+
+# zsh (persisted, macOS/Homebrew)
+awsc completion zsh > "$(brew --prefix)/share/zsh/site-functions/_awsc"
+
+# bash (persisted)
+awsc completion bash | sudo tee /etc/bash_completion.d/awsc > /dev/null
+```
+
+Run `awsc completion --help` for other shells.
+
 ## Multi-Profile Support
 
-AWSC supports multiple AWS accounts simultaneously using a hybrid approach:
-
-### Automatic Per-Terminal Sessions (PPID Tracking)
-
-Each terminal window automatically tracks its own AWS session:
+Work with multiple AWS accounts at once. Each terminal tracks its own session (by PPID), so different windows can use different accounts simultaneously:
 
 ```bash
 # Terminal 1
-$ ./awsc login
-# Select prod-account → Creates awsc-prod-account profile
-$ ./awsc ec2 connect
-# Automatically uses awsc-prod-account
+$ ./awsc login        # select prod-account → creates the awsc-prod-account profile
+$ ./awsc ec2 connect  # uses awsc-prod-account
 
-# Terminal 2 (different terminal window)
-$ ./awsc login
-# Select dev-account → Creates awsc-dev-account profile
-$ ./awsc rds connect
-# Automatically uses awsc-dev-account
-
-# Both terminals work independently!
+# Terminal 2
+$ ./awsc login        # select dev-account → creates the awsc-dev-account profile
+$ ./awsc rds connect  # uses awsc-dev-account
 ```
 
-### Explicit Profile Override
-
-Use the `AWSC_PROFILE` environment variable to explicitly set which profile to use:
+Override the active profile for a terminal with `AWSC_PROFILE`:
 
 ```bash
-# Override for specific terminal session
-$ export AWSC_PROFILE=awsc-prod-account
-$ ./awsc ec2 connect  # Uses awsc-prod-account
-$ ./awsc rds connect  # Still uses awsc-prod-account
-
-# Switch to different profile
-$ export AWSC_PROFILE=awsc-dev-account
-$ ./awsc secrets show  # Now uses awsc-dev-account
+export AWSC_PROFILE=awsc-prod-account
 ```
 
-### Automatic Error Recovery
-
-AWSC automatically handles authentication errors:
-
-- **Missing profile**: If the profile is deleted from `~/.aws/config`, awsc will detect it and prompt you to login again
-- **Expired credentials**: When credentials expire, awsc prompts for re-authentication
-- **No active session**: First-time users are automatically guided through login
-
-All commands automatically recover from authentication errors without manual intervention.
-
-### AWS CLI Integration
-
-All profiles created by AWSC can be used with the AWS CLI:
-
-```bash
-$ aws s3 ls --profile awsc-prod-account
-$ aws ec2 describe-instances --profile awsc-dev-account
-$ aws rds describe-db-instances --profile awsc-staging-account
-```
-
-### Profile Naming
-
-Profiles are automatically named `awsc-{accountName}` where `{accountName}` is your AWS account name. Credentials are stored in `~/.aws/config` and work until they expire.
-
-### Platform Support
-
-Multi-profile support works on **macOS and Linux only**. Windows users should use WSL (Windows Subsystem for Linux) for the best experience.
+- **Profiles** are written to `~/.aws/config` as `awsc-{accountName}` and work with the AWS CLI too (`aws s3 ls --profile awsc-prod-account`).
+- **Auth recovery** is automatic: missing profiles, expired credentials, and first-time use all prompt you through login without manual intervention.
+- **Platform**: macOS and Linux (PPID tracking is Unix-only; Windows users should use WSL).
 
 ## Commands
 
@@ -116,6 +130,7 @@ All commands support both interactive selection and direct parameter access:
 ./awsc rds connect --name "my-cluster (reader)"  # Connect to Aurora cluster reader endpoint
 ./awsc rds connect --name my-db-instance --local-port 5432  # Connect with custom local port
 ./awsc rds connect -s --name my-db  # Switch AWS account first, then connect
+./awsc rds connect -l --name my-db  # List and select bastion host manually
 
 # EC2 Sessions
 ./awsc ec2 connect             # List and select EC2 instances for SSM session
@@ -131,6 +146,7 @@ All commands support both interactive selection and direct parameter access:
 ./awsc opensearch connect --name my-domain  # Connect to specific OpenSearch domain directly
 ./awsc opensearch connect --name my-domain --local-port 9200  # Connect with custom local port
 ./awsc opensearch connect -s --name prod-domain  # Switch AWS account first, then connect
+./awsc opensearch connect -l --name my-domain  # List and select bastion host manually
 
 # Secrets Manager
 ./awsc secrets show            # List and select secrets interactively
@@ -151,46 +167,54 @@ All resource commands follow a consistent pattern:
 
 ## Global Options
 
+These flags work with any command:
+
+| Flag | Description |
+| --- | --- |
+| `--region <region>` | Override the AWS region for this command |
+| `--config <path>` | Use an alternate config file |
+| `--verbose`, `-v` | Enable debug output |
+
+Resource commands (`rds`/`ec2`/`opensearch`) also accept `--switch-account`, `-s` to switch AWS account first using the existing SSO session.
+
 ```bash
-# Override AWS region for any command
-./awsc --region us-west-2 secrets show --name my-secret
-./awsc --region eu-west-1 rds connect --name my-db
-./awsc --region ap-southeast-1 ec2 connect --instance-id i-1234567890abcdef0
-./awsc --region us-west-2 opensearch connect --name my-domain
-# Use alternate config file
+./awsc --region us-west-2 rds connect --name my-db
 ./awsc --config ~/.awsc-dev/config.yaml login
-
-# Enable verbose debugging output
-./awsc --verbose rds connect --name my-db
-./awsc -v ec2 connect
-
-# Force re-authentication
-./awsc login --force
-
-# Direct login to specific account and role
-./awsc login --account production-account --role admin-role
-./awsc login --force --account dev-account --role developer-role
-
-# Switch AWS account before connecting (uses existing SSO session)
-./awsc rds connect --switch-account --name prod-db
-./awsc ec2 connect -s --instance-id i-123
-./awsc ec2 rdp -s --instance-id i-456
-./awsc opensearch connect -s --name prod-opensearch
-
-# Combine flags
-./awsc --verbose --region us-west-2 rds connect --name production-db
-./awsc --region ap-southeast-2 secrets show --name /prod/api-keys
-./awsc --verbose --region us-east-1 secrets show --name /prod/database-password
-./awsc -s --region us-west-2 rds connect --name prod-db  # Switch account + region
-./awsc --verbose --region eu-west-1 opensearch connect --name prod-search
+./awsc -s --region us-west-2 rds connect --name prod-db   # switch account + region
 ```
+
+Flags can be combined freely.
 
 ## Configuration
 
-Config stored at `~/.awsc/config.yaml`:
+Configuration is stored at `~/.awsc/config.yaml` and is created interactively by `awsc config init`. It contains three required values:
+
+| Key | Description | Example |
+| --- | --- | --- |
+| `sso.start_url` | Your AWS SSO start URL (`https://<org>.awsapps.com/start`) | `https://my-org.awsapps.com/start` |
+| `sso.region` | Region where AWS SSO / IAM Identity Center is configured | `us-east-1` |
+| `default_region` | Default region for RDS/EC2/OpenSearch/Secrets operations (overridable with `--region`) | `us-east-1` |
+
+Example `~/.awsc/config.yaml`:
+
+```yaml
+sso:
+  start_url: https://my-org.awsapps.com/start
+  region: us-east-1
+default_region: us-east-1
+```
+
+Use a different config file for a command with the global `--config` flag, and view the active configuration with `awsc config show`.
 
 ## Development
 
 ```bash
-make dev
+make dev          # mocks + deps + test + build
+make build        # build ./awsc (version injected via ldflags)
+make test         # go test ./...
+make vuln         # govulncheck vulnerability scan
+make mocks        # regenerate internal/aws/mocks (after changing a *Client interface)
 ```
+
+The only external runtime dependency is `session-manager-plugin` (used for SSM sessions and port forwarding); there is no dependency on the AWS CLI.
+

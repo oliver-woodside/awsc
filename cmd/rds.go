@@ -25,6 +25,7 @@ var rdsConnectCmd = &cobra.Command{
 var localPort int
 var rdsInstanceName string
 var switchAccount bool
+var rdsListBastions bool
 
 func init() {
 	rootCmd.AddCommand(rdsCmd)
@@ -32,10 +33,16 @@ func init() {
 	rdsConnectCmd.Flags().IntVar(&localPort, "local-port", 0, "Local port for port forwarding (defaults to RDS port)")
 	rdsConnectCmd.Flags().StringVar(&rdsInstanceName, "name", "", "Name of the RDS instance to connect to directly")
 	rdsConnectCmd.Flags().BoolVarP(&switchAccount, "switch-account", "s", false, "Switch AWS account before connecting")
+	rdsConnectCmd.Flags().BoolVarP(&rdsListBastions, "list-bastions", "l", false, "List and select from available bastion hosts")
 }
 
 func runRDSConnect(cmd *cobra.Command, args []string) {
 	ctx := context.Background()
+
+	if err := validateLocalPort(localPort); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
 
 	// Track if we just authenticated (to avoid double-login with -s flag)
 	justAuthenticated := false
@@ -82,8 +89,8 @@ func runRDSConnect(cmd *cobra.Command, args []string) {
 	}
 
 	// Run the RDS connect workflow
-	if err := rdsManager.RunConnect(ctx, rdsInstanceName, int32(localPort)); err != nil {
-		fmt.Printf("Error: %v\n", err)
+	if err := rdsManager.RunConnect(ctx, rdsInstanceName, int32(localPort), rdsListBastions); err != nil {
+		fmt.Printf("\n✗ Error: %v\n", err)
 		os.Exit(1)
 	}
 }

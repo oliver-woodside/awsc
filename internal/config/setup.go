@@ -2,7 +2,6 @@ package config
 
 import (
 	"bufio"
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -52,6 +51,12 @@ var ssoURLPatternNew = regexp.MustCompile(`^https://identitycenter\.amazonaws\.c
 // validateRegion checks if the region is a valid AWS region
 func validateRegion(region string) bool {
 	return awsRegions[region]
+}
+
+// ValidateRegion reports whether region is a recognized AWS region. Exported for
+// validating the global --region flag.
+func ValidateRegion(region string) bool {
+	return validateRegion(region)
 }
 
 // validateSSOURL checks if the SSO URL matches the expected pattern
@@ -166,51 +171,6 @@ func InitializeConfigWithPrompt() error {
 	}
 
 	return InitializeConfig()
-}
-
-// EnsureConfigAndAuth checks for config and prompts for setup/login if needed
-func EnsureConfigAndAuth(ctx context.Context) error {
-	// Check if config exists
-	if viper.GetString("sso.start_url") == "" {
-		fmt.Printf("No SSO configuration found.\n")
-		fmt.Print("Would you like to set up configuration now? (y/N): ")
-
-		var response string
-		fmt.Scanln(&response)
-
-		if response != "y" && response != "Y" && response != "yes" && response != "Yes" {
-			fmt.Printf("Configuration required. Run 'awsc config init' to set up.\n")
-			return fmt.Errorf("configuration required")
-		}
-
-		if err := InitializeConfig(); err != nil {
-			return fmt.Errorf("failed to initialize config: %v", err)
-		}
-
-		fmt.Printf("\nConfiguration complete. Now let's authenticate...\n")
-	}
-
-	// Check if we have valid credentials by trying to load AWS config
-	_, err := LoadAWSConfigWithProfile(ctx)
-	if err != nil {
-		// If we can't load config, we need to authenticate
-		fmt.Printf("Authentication required.\n")
-		fmt.Print("Would you like to login now? (y/N): ")
-
-		var response string
-		fmt.Scanln(&response)
-
-		if response != "y" && response != "Y" && response != "yes" && response != "Yes" {
-			fmt.Printf("Authentication required. Run 'awsc login' to authenticate.\n")
-			return fmt.Errorf("authentication required")
-		}
-
-		// Import the aws package to run login
-		// We'll need to handle this differently since we can't import aws here
-		return fmt.Errorf("please run 'awsc login' to authenticate")
-	}
-
-	return nil
 }
 
 // ShowConfig displays the current configuration

@@ -103,7 +103,7 @@ func runEC2Connect(cmd *cobra.Command, args []string) {
 	instanceIdFlag, _ := cmd.Flags().GetString("instance-id")
 
 	if err := ec2Manager.RunConnect(ctx, instanceIdFlag); err != nil {
-		fmt.Printf("Error: %v\n", err)
+		fmt.Printf("\n✗ Error: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -158,8 +158,13 @@ func runEC2RDP(cmd *cobra.Command, args []string) {
 	instanceIdFlag, _ := cmd.Flags().GetString("instance-id")
 	localPortFlag, _ := cmd.Flags().GetInt32("local-port")
 
+	if err := validateLocalPort(int(localPortFlag)); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+
 	if err := ec2Manager.RunRDP(ctx, instanceIdFlag, localPortFlag); err != nil {
-		fmt.Printf("Error: %v\n", err)
+		fmt.Printf("\n✗ Error: %v\n", err)
 		os.Exit(1)
 	}
 }

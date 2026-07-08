@@ -82,7 +82,7 @@ func NewRDSManager(ctx context.Context, opts ...RDSManagerOptions) (*RDSManager,
 	}, nil
 }
 
-func (r *RDSManager) RunConnect(ctx context.Context, instanceName string, localPort int32) error {
+func (r *RDSManager) RunConnect(ctx context.Context, instanceName string, localPort int32, listBastions bool) error {
 	// List RDS instances
 	instances, err := r.ListRDSInstances(ctx)
 	if err != nil {
@@ -109,13 +109,12 @@ func (r *RDSManager) RunConnect(ctx context.Context, instanceName string, localP
 			fmt.Printf("Connecting to RDS instance: %s\n", targetInstance.Identifier)
 			selectedInstance = *targetInstance
 		} else {
-			fmt.Printf("RDS instance '%s' not found. Available instances:\n\n", instanceName)
-			// Fall through to show list of available instances
+			return fmt.Errorf("RDS instance '%s' not found", instanceName)
 		}
 	}
 
-	// If no instance name provided or instance not found, show interactive selection
-	if instanceName == "" || selectedInstance.Identifier == "" {
+	// If no instance name provided, show interactive selection
+	if instanceName == "" {
 		// Create instance options for selection
 		instanceOptions := make([]string, len(instances))
 		for i, instance := range instances {
@@ -145,7 +144,7 @@ func (r *RDSManager) RunConnect(ctx context.Context, instanceName string, localP
 	}
 
 	// Find bastion hosts
-	bastions, err := r.FindBastionHosts(ctx, selectedInstance)
+	bastions, err := r.FindBastionHosts(ctx, selectedInstance, listBastions)
 	if err != nil {
 		return err
 	}
@@ -154,9 +153,25 @@ func (r *RDSManager) RunConnect(ctx context.Context, instanceName string, localP
 		return fmt.Errorf("no bastion hosts available for %s", selectedInstance.Identifier)
 	}
 
-	// Use first available bastion
-	bastion := bastions[0]
-	fmt.Printf("Using bastion: %s\n", bastion.Name)
+	var bastion BastionHost
+	if listBastions && len(bastions) > 1 {
+		bastionOptions := make([]string, len(bastions))
+		for i, b := range bastions {
+			bastionOptions[i] = fmt.Sprintf("%s (%s)", b.Name, b.InstanceId)
+		}
+		selectedIndex, err := ui.RunSelector("Select Bastion Host:", bastionOptions)
+		if err != nil {
+			return fmt.Errorf("error selecting bastion: %v", err)
+		}
+		if selectedIndex == -1 {
+			return fmt.Errorf("no bastion selected")
+		}
+		bastion = bastions[selectedIndex]
+		fmt.Printf("✓ Selected bastion: %s (%s)\n", bastion.Name, bastion.InstanceId)
+	} else {
+		bastion = bastions[0]
+		fmt.Printf("Using bastion: %s (%s)\n", bastion.Name, bastion.InstanceId)
+	}
 
 	// Use default local port if not specified
 	if localPort == 0 {
@@ -226,12 +241,17 @@ func (r *RDSManager) getDBInstances(ctx context.Context) ([]RDSInstance, error) 
 	var instances []RDSInstance
 	for _, db := range allDBInstances {
 		if db.DBInstanceStatus != nil && *db.DBInstanceStatus == "available" && db.DBClusterIdentifier == nil {
-			// Only include standalone instances (not part of a cluster)
+			// Only include standalone instances (not part of a cluster).
+			// Endpoint can be nil for instances that report "available" but
+			// have no resolvable endpoint yet; skip those rather than panic.
+			if db.Endpoint == nil || db.Endpoint.Address == nil || db.Endpoint.Port == nil {
+				continue
+			}
 			instances = append(instances, RDSInstance{
-				Identifier:   *db.DBInstanceIdentifier,
-				Endpoint:     *db.Endpoint.Address,
-				Port:         *db.Endpoint.Port,
-				Engine:       *db.Engine,
+				Identifier:   aws.ToString(db.DBInstanceIdentifier),
+				Endpoint:     aws.ToString(db.Endpoint.Address),
+				Port:         aws.ToInt32(db.Endpoint.Port),
+				Engine:       aws.ToString(db.Engine),
 				EndpointType: "instance",
 			})
 		}
@@ -279,27 +299,28 @@ func (r *RDSManager) getClusterEndpoints(ctx context.Context) ([]RDSInstance, er
 	var instances []RDSInstance
 	for _, cluster := range allClusters {
 		if cluster.Status != nil && *cluster.Status == "available" {
+			clusterID := aws.ToString(cluster.DBClusterIdentifier)
 			// Add cluster writer endpoint
 			if cluster.Endpoint != nil {
 				instances = append(instances, RDSInstance{
-					Identifier:   *cluster.DBClusterIdentifier + " (writer)",
-					Endpoint:     *cluster.Endpoint,
-					Port:         *cluster.Port,
-					Engine:       *cluster.Engine,
+					Identifier:   clusterID + " (writer)",
+					Endpoint:     aws.ToString(cluster.Endpoint),
+					Port:         aws.ToInt32(cluster.Port),
+					Engine:       aws.ToString(cluster.Engine),
 					EndpointType: "cluster-writer",
-					ClusterName:  *cluster.DBClusterIdentifier,
+					ClusterName:  clusterID,
 				})
 			}
 
 			// Add cluster reader endpoint
 			if cluster.ReaderEndpoint != nil {
 				instances = append(instances, RDSInstance{
-					Identifier:   *cluster.DBClusterIdentifier + " (reader)",
-					Endpoint:     *cluster.ReaderEndpoint,
-					Port:         *cluster.Port,
-					Engine:       *cluster.Engine,
+					Identifier:   clusterID + " (reader)",
+					Endpoint:     aws.ToString(cluster.ReaderEndpoint),
+					Port:         aws.ToInt32(cluster.Port),
+					Engine:       aws.ToString(cluster.Engine),
 					EndpointType: "cluster-reader",
-					ClusterName:  *cluster.DBClusterIdentifier,
+					ClusterName:  clusterID,
 				})
 			}
 		}
@@ -308,7 +329,7 @@ func (r *RDSManager) getClusterEndpoints(ctx context.Context) ([]RDSInstance, er
 	return instances, nil
 }
 
-func (r *RDSManager) FindBastionHosts(ctx context.Context, rdsInstance RDSInstance) ([]BastionHost, error) {
+func (r *RDSManager) FindBastionHosts(ctx context.Context, rdsInstance RDSInstance, findAll bool) ([]BastionHost, error) {
 	// Get RDS security groups
 	rdsSecurityGroups, err := r.getRDSSecurityGroups(ctx, rdsInstance)
 	if err != nil {
@@ -317,7 +338,13 @@ func (r *RDSManager) FindBastionHosts(ctx context.Context, rdsInstance RDSInstan
 
 	debug.Printf("RDS %s security groups: %v\n", rdsInstance.Identifier, rdsSecurityGroups)
 
-	// Find all EC2 instances (running and stopped) that can connect to RDS
+	// Pre-fetch all SG inbound rules once (avoids repeated API calls per instance)
+	sgRulesCache, err := r.fetchSecurityGroupRules(ctx, rdsSecurityGroups)
+	if err != nil {
+		return nil, err
+	}
+
+	// Find EC2 instances that can connect to RDS
 	var allReservations []types.Reservation
 	var nextToken *string
 
@@ -328,11 +355,9 @@ func (r *RDSManager) FindBastionHosts(ctx context.Context, rdsInstance RDSInstan
 		if err != nil {
 			if IsAuthError(err) {
 				if shouldReauth, reAuthErr := PromptForReauth(ctx); shouldReauth && reAuthErr == nil {
-					// Reload all clients with fresh credentials
 					if reloadErr := r.reloadClients(ctx); reloadErr != nil {
 						return nil, reloadErr
 					}
-					// Retry after re-authentication
 					result, err = r.ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
 						NextToken: nextToken,
 					})
@@ -349,7 +374,6 @@ func (r *RDSManager) FindBastionHosts(ctx context.Context, rdsInstance RDSInstan
 
 		allReservations = append(allReservations, result.Reservations...)
 
-		// Check if there are more pages
 		if result.NextToken == nil {
 			break
 		}
@@ -357,13 +381,11 @@ func (r *RDSManager) FindBastionHosts(ctx context.Context, rdsInstance RDSInstan
 	}
 
 	// Count and categorize instances
-	totalInstances := 0
 	runningInstances := 0
 	stoppedInstances := 0
 	var stoppedInstanceNames []string
 
 	for _, reservation := range allReservations {
-		totalInstances += len(reservation.Instances)
 		for _, instance := range reservation.Instances {
 			if instance.State != nil {
 				if instance.State.Name == "running" {
@@ -375,62 +397,66 @@ func (r *RDSManager) FindBastionHosts(ctx context.Context, rdsInstance RDSInstan
 			}
 		}
 	}
-	debug.Printf("Found %d total EC2 instances (%d running, %d stopped)\n", totalInstances, runningInstances, stoppedInstances)
+	debug.Printf("Found %d running and %d stopped EC2 instances\n", runningInstances, stoppedInstances)
 
+	// Check running instances
 	var bastions []BastionHost
 	for _, reservation := range allReservations {
 		for _, instance := range reservation.Instances {
-			// Only check running instances for bastion capability
 			if instance.State == nil || instance.State.Name != "running" {
 				continue
 			}
 
 			name := r.getInstanceName(instance.Tags)
 			ec2SgIds := r.getSecurityGroupIds(instance.SecurityGroups)
-			debug.Printf("Checking instance %s (%s) with security groups: %v\n", name, *instance.InstanceId, ec2SgIds)
+			debug.Printf("Checking if EC2 instance %s (%s) can reach RDS — EC2 security groups: %v\n", name, aws.ToString(instance.InstanceId), ec2SgIds)
 
-			if r.canConnectToRDS(ctx, instance.SecurityGroups, rdsSecurityGroups, rdsInstance.Port) {
-				debug.Printf("✓ Instance %s can connect to RDS\n", name)
-				bastions = append(bastions, BastionHost{
-					InstanceId:       *instance.InstanceId,
+			if r.canConnectWithCachedRules(instance.SecurityGroups, sgRulesCache, rdsInstance.Port) {
+				debug.Printf("✓ EC2 instance %s can connect to RDS %s\n", name, rdsInstance.Identifier)
+				bastion := BastionHost{
+					InstanceId:       aws.ToString(instance.InstanceId),
 					Name:             name,
 					SecurityGroupIds: ec2SgIds,
-				})
+				}
+				if !findAll {
+					return []BastionHost{bastion}, nil
+				}
+				bastions = append(bastions, bastion)
 			} else {
-				debug.Printf("✗ Instance %s cannot connect to RDS\n", name)
+				debug.Printf("✗ EC2 instance %s cannot connect to RDS %s\n", name, rdsInstance.Identifier)
 			}
 		}
 	}
 
-	if len(bastions) == 0 {
-		// Show stopped instances if any exist
+	if len(bastions) > 0 {
+		return bastions, nil
+	}
+
+	// No bastion found - show helpful error
+	if stoppedInstances > 0 {
+		fmt.Printf("\nFound %d stopped EC2 instance(s):\n", stoppedInstances)
+		for _, name := range stoppedInstanceNames {
+			fmt.Printf("- %s (stopped)\n", name)
+		}
+		fmt.Printf("\n")
+	}
+
+	if runningInstances == 0 {
+		fmt.Printf("No running EC2 instances found in region %s.\n", r.region)
+		fmt.Printf("To use RDS port forwarding, you need a running EC2 instance with:\n")
+		fmt.Printf("- SSM agent installed and configured\n")
+		fmt.Printf("- Network access to the RDS instance\n")
 		if stoppedInstances > 0 {
-			fmt.Printf("\nFound %d stopped EC2 instance(s):\n", stoppedInstances)
-			for _, name := range stoppedInstanceNames {
-				fmt.Printf("- %s (stopped)\n", name)
-			}
-			fmt.Printf("\n")
+			fmt.Printf("\nYou can start one of the stopped instances above and try again.\n")
+			return nil, fmt.Errorf("no running bastion hosts found - %d stopped instances available", stoppedInstances)
 		}
-
-		if runningInstances == 0 {
-			fmt.Printf("No running EC2 instances found in region %s.\n", r.region)
-			fmt.Printf("To use RDS port forwarding, you need a running EC2 instance with:\n")
-			fmt.Printf("- SSM agent installed and configured\n")
-			fmt.Printf("- Network access to the RDS instance\n")
-			if stoppedInstances > 0 {
-				fmt.Printf("\nYou can start one of the stopped instances above and try again.\n")
-				return nil, fmt.Errorf("no running bastion hosts found - %d stopped instances available", stoppedInstances)
-			}
-			fmt.Printf("\nAlternatively, you can connect directly if your RDS is publicly accessible.\n")
-			return nil, fmt.Errorf("no running EC2 instances found in region %s", r.region)
-		} else {
-			fmt.Printf("Found %d running EC2 instances but none can connect to RDS %s.\n", runningInstances, rdsInstance.Identifier)
-			fmt.Printf("This usually means the security groups don't allow the connection.\n")
-			return nil, fmt.Errorf("no suitable bastion hosts found - security groups may not allow connection")
-		}
+		fmt.Printf("\nAlternatively, you can connect directly if your RDS is publicly accessible.\n")
+		return nil, fmt.Errorf("no running EC2 instances found in region %s", r.region)
 	}
 
-	return bastions, nil
+	fmt.Printf("Found %d running EC2 instances but none can connect to RDS %s.\n", runningInstances, rdsInstance.Identifier)
+	fmt.Printf("This usually means the security groups don't allow the connection.\n")
+	return nil, fmt.Errorf("no suitable bastion hosts found - security groups may not allow connection")
 }
 
 func (r *RDSManager) StartPortForwarding(ctx context.Context, bastionId, rdsEndpoint string, rdsPort, localPort int32) error {
@@ -442,7 +468,7 @@ func (r *RDSManager) StartPortForwarding(ctx context.Context, bastionId, rdsEndp
 
 	pf := NewExternalPluginForwarder(cfg)
 
-	fmt.Printf("Starting port forwarding via %s...\n", bastionId)
+	fmt.Printf("Starting port forwarding...\n")
 
 	// Start port forwarding to remote host through bastion
 	return pf.StartPortForwardingToRemoteHost(ctx, bastionId, rdsEndpoint, int(rdsPort), int(localPort))
@@ -480,7 +506,9 @@ func (r *RDSManager) getRDSSecurityGroups(ctx context.Context, rdsInstance RDSIn
 
 		var sgIds []string
 		for _, sg := range result.DBClusters[0].VpcSecurityGroups {
-			sgIds = append(sgIds, *sg.VpcSecurityGroupId)
+			if sg.VpcSecurityGroupId != nil {
+				sgIds = append(sgIds, *sg.VpcSecurityGroupId)
+			}
 		}
 		return sgIds, nil
 	} else {
@@ -514,102 +542,97 @@ func (r *RDSManager) getRDSSecurityGroups(ctx context.Context, rdsInstance RDSIn
 
 		var sgIds []string
 		for _, sg := range result.DBInstances[0].VpcSecurityGroups {
-			sgIds = append(sgIds, *sg.VpcSecurityGroupId)
+			if sg.VpcSecurityGroupId != nil {
+				sgIds = append(sgIds, *sg.VpcSecurityGroupId)
+			}
 		}
 		return sgIds, nil
 	}
 }
 
-func (r *RDSManager) canConnectToRDS(ctx context.Context, ec2SecurityGroups []types.GroupIdentifier, rdsSecurityGroups []string, rdsPort int32) bool {
-	ec2SgIds := make(map[string]bool)
-	for _, sg := range ec2SecurityGroups {
-		ec2SgIds[*sg.GroupId] = true
-	}
-
-	// Check if any RDS security group allows inbound from EC2 security groups
-	for _, rdsSgId := range rdsSecurityGroups {
-		if r.checkSecurityGroupRules(ctx, rdsSgId, ec2SgIds, rdsPort) {
-			return true
-		}
-	}
-
-	return false
-}
-
-func (r *RDSManager) checkSecurityGroupRules(ctx context.Context, rdsSgId string, ec2SgIds map[string]bool, port int32) bool {
-	result, err := r.ec2Client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
-		GroupIds: []string{rdsSgId},
-	})
-	if err != nil {
-		if IsAuthError(err) {
-			if shouldReauth, reAuthErr := PromptForReauth(ctx); shouldReauth && reAuthErr == nil {
-				// Reload all clients with fresh credentials
-				if reloadErr := r.reloadClients(ctx); reloadErr != nil {
-					debug.Printf("  Error reloading clients: %v\n", reloadErr)
-					return false
-				}
-				// Retry after re-authentication
-				result, err = r.ec2Client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
-					GroupIds: []string{rdsSgId},
-				})
-				if err != nil {
-					debug.Printf("  Error describing security group %s after retry: %v\n", rdsSgId, err)
-					return false
+func (r *RDSManager) fetchSecurityGroupRules(ctx context.Context, sgIds []string) (map[string][]types.IpPermission, error) {
+	cache := make(map[string][]types.IpPermission, len(sgIds))
+	for _, sgId := range sgIds {
+		result, err := r.ec2Client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
+			GroupIds: []string{sgId},
+		})
+		if err != nil {
+			if IsAuthError(err) {
+				if shouldReauth, reAuthErr := PromptForReauth(ctx); shouldReauth && reAuthErr == nil {
+					if reloadErr := r.reloadClients(ctx); reloadErr != nil {
+						return nil, reloadErr
+					}
+					result, err = r.ec2Client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
+						GroupIds: []string{sgId},
+					})
+					if err != nil {
+						return nil, err
+					}
+				} else {
+					return nil, err
 				}
 			} else {
-				return false
+				return nil, err
 			}
-		} else {
-			debug.Printf("  Error describing security group %s: %v\n", rdsSgId, err)
-			return false
+		}
+		if len(result.SecurityGroups) > 0 {
+			cache[sgId] = result.SecurityGroups[0].IpPermissions
+		}
+	}
+	return cache, nil
+}
+
+func (r *RDSManager) canConnectWithCachedRules(ec2SecurityGroups []types.GroupIdentifier, sgRulesCache map[string][]types.IpPermission, port int32) bool {
+	ec2SgIds := make(map[string]bool)
+	for _, sg := range ec2SecurityGroups {
+		if sg.GroupId != nil {
+			ec2SgIds[*sg.GroupId] = true
 		}
 	}
 
-	if len(result.SecurityGroups) == 0 {
-		debug.Printf("  No security group found for %s\n", rdsSgId)
-		return false
-	}
-
-	debug.Printf("  Checking security group %s rules for port %d\n", rdsSgId, port)
-
-	for _, rule := range result.SecurityGroups[0].IpPermissions {
-		if r.ruleMatchesPort(rule, port) {
-			debug.Printf("    Rule matches port %d\n", port)
-			// Check if rule allows access from EC2 security groups
-			for _, userIdGroupPair := range rule.UserIdGroupPairs {
-				if userIdGroupPair.GroupId != nil {
-					var ec2SgList []string
-					for sgId := range ec2SgIds {
-						ec2SgList = append(ec2SgList, sgId)
-					}
-					debug.Printf("      Checking if EC2 SG %s is allowed (EC2 has: %s)\n", *userIdGroupPair.GroupId, strings.Join(ec2SgList, ", "))
-					if ec2SgIds[*userIdGroupPair.GroupId] {
-						debug.Printf("      ✓ Match found!\n")
-						return true
+	for sgId, rules := range sgRulesCache {
+		debug.Printf("  Checking RDS security group %s inbound rules for port %d\n", sgId, port)
+		for _, rule := range rules {
+			if r.ruleMatchesPort(rule, port) {
+				debug.Printf("    Rule allows port %d\n", port)
+				for _, pair := range rule.UserIdGroupPairs {
+					if pair.GroupId != nil {
+						var ec2SgList []string
+						for id := range ec2SgIds {
+							ec2SgList = append(ec2SgList, id)
+						}
+						if ec2SgIds[*pair.GroupId] {
+							debug.Printf("      RDS SG allows %s → EC2 has %s ✓ match!\n", *pair.GroupId, strings.Join(ec2SgList, ", "))
+							return true
+						}
+						debug.Printf("      RDS SG allows %s → EC2 has %s — no match\n", *pair.GroupId, strings.Join(ec2SgList, ", "))
 					}
 				}
-			}
-			// Check for open access (0.0.0.0/0)
-			for _, ipRange := range rule.IpRanges {
-				if ipRange.CidrIp != nil {
-					debug.Printf("      Checking IP range: %s\n", *ipRange.CidrIp)
-					if *ipRange.CidrIp == "0.0.0.0/0" {
-						debug.Printf("      ✓ Open access found!\n")
-						return true
+				for _, ipRange := range rule.IpRanges {
+					if ipRange.CidrIp != nil {
+						if *ipRange.CidrIp == "0.0.0.0/0" {
+							debug.Printf("      RDS SG allows 0.0.0.0/0 (open access) ✓\n")
+							return true
+						}
+						debug.Printf("      RDS SG allows CIDR %s — not matched (only SG-to-SG supported)\n", *ipRange.CidrIp)
 					}
 				}
+			} else {
+				if rule.FromPort != nil && rule.ToPort != nil {
+					debug.Printf("    Rule for port range %d-%d does not cover port %d\n", *rule.FromPort, *rule.ToPort, port)
+				} else {
+					debug.Printf("    Rule does not cover port %d\n", port)
+				}
 			}
-		} else {
-			debug.Printf("    Rule does not match port %d (from:%v to:%v)\n", port, rule.FromPort, rule.ToPort)
 		}
 	}
-
 	return false
 }
 
 func (r *RDSManager) ruleMatchesPort(rule types.IpPermission, port int32) bool {
+	// All-traffic rules (protocol -1) have nil ports and match everything
 	if rule.FromPort == nil || rule.ToPort == nil {
-		return false
+		return rule.IpProtocol != nil && *rule.IpProtocol == "-1"
 	}
 	return *rule.FromPort <= port && port <= *rule.ToPort
 }
@@ -626,7 +649,9 @@ func (r *RDSManager) getInstanceName(tags []types.Tag) string {
 func (r *RDSManager) getSecurityGroupIds(sgs []types.GroupIdentifier) []string {
 	var ids []string
 	for _, sg := range sgs {
-		ids = append(ids, *sg.GroupId)
+		if sg.GroupId != nil {
+			ids = append(ids, *sg.GroupId)
+		}
 	}
 	return ids
 }

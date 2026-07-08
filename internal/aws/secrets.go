@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
@@ -96,15 +98,19 @@ func (s *SecretsManager) ListSecrets(ctx context.Context) ([]Secret, error) {
 
 	var secrets []Secret
 	for _, secret := range allSecrets {
+		// A secret without a name cannot be selected or fetched; skip it.
+		if secret.Name == nil {
+			continue
+		}
 		description := ""
 		if secret.Description != nil {
 			description = *secret.Description
 		}
 
 		secrets = append(secrets, Secret{
-			Name:        *secret.Name,
+			Name:        aws.ToString(secret.Name),
 			Description: description,
-			ARN:         *secret.ARN,
+			ARN:         aws.ToString(secret.ARN),
 		})
 	}
 
@@ -150,24 +156,24 @@ func (s *SecretsManager) DisplaySecret(ctx context.Context, secretName, secretVa
 	// Try to parse as JSON for pretty printing
 	var jsonData interface{}
 	if err := json.Unmarshal([]byte(secretValue), &jsonData); err == nil {
-		prettyJSON, _ := json.MarshalIndent(jsonData, "", "  ")
-		fmt.Printf("%s\n", string(prettyJSON))
-	} else {
-		// Display as plain text
-		fmt.Printf("%s\n", secretValue)
+		if prettyJSON, marshalErr := json.MarshalIndent(jsonData, "", "  "); marshalErr == nil {
+			fmt.Printf("%s\n", string(prettyJSON))
+			return
+		}
 	}
+	// Display as plain text (not JSON, or pretty-print failed)
+	fmt.Printf("%s\n", secretValue)
 }
 
 func (s *SecretsManager) RunShowSecrets(ctx context.Context, secretName string) error {
 	// If secret name provided, try to show it directly
 	if secretName != "" {
-		fmt.Printf("Showing secret: %s\n", secretName)
+		fmt.Fprintf(os.Stderr, "Showing secret: %s\n", secretName)
 
 		// Get secret value
 		secretValue, err := s.GetSecretValue(ctx, secretName)
 		if err != nil {
-			fmt.Printf("Secret '%s' not found. Available secrets:\n\n", secretName)
-			// Fall through to show list of available secrets
+			return fmt.Errorf("secret '%s' not found: %v", secretName, err)
 		} else {
 			// Display the secret and return
 			s.DisplaySecret(ctx, secretName, secretValue)
@@ -182,14 +188,14 @@ func (s *SecretsManager) RunShowSecrets(ctx context.Context, secretName string) 
 	}
 
 	if len(secrets) == 0 {
-		fmt.Printf("No secrets found in this account\n")
+		fmt.Fprintf(os.Stderr, "No secrets found in this account\n")
 		return nil
 	}
 
 	// Create selection choices
 	var choices []string
 	for _, secret := range secrets {
-		description := secret.Description
+		description := strings.ReplaceAll(secret.Description, "\n", " ")
 		if description == "" {
 			description = "No description"
 		}
@@ -206,7 +212,7 @@ func (s *SecretsManager) RunShowSecrets(ctx context.Context, secretName string) 
 	}
 
 	selectedSecret := secrets[selectedIndex].Name
-	fmt.Printf("✓ Selected: %s\n", selectedSecret)
+	fmt.Fprintf(os.Stderr, "✓ Selected: %s\n", selectedSecret)
 
 	// Get secret value
 	secretValue, err := s.GetSecretValue(ctx, selectedSecret)
