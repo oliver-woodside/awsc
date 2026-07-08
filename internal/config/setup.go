@@ -45,8 +45,9 @@ var awsRegions = map[string]bool{
 	"sa-east-1":      true,
 }
 
-// SSO URL regex pattern
-var ssoURLPattern = regexp.MustCompile(`^https://[a-zA-Z0-9-]+\.awsapps\.com/start/?$`)
+// SSO URL regex patterns
+var ssoURLPatternLegacy = regexp.MustCompile(`^https://[a-zA-Z0-9-]+\.awsapps\.com/start/?$`)
+var ssoURLPatternNew = regexp.MustCompile(`^https://identitycenter\.amazonaws\.com/ssoins-[a-zA-Z0-9]+/?$`)
 
 // validateRegion checks if the region is a valid AWS region
 func validateRegion(region string) bool {
@@ -55,7 +56,7 @@ func validateRegion(region string) bool {
 
 // validateSSOURL checks if the SSO URL matches the expected pattern
 func validateSSOURL(url string) bool {
-	return ssoURLPattern.MatchString(url)
+	return ssoURLPatternLegacy.MatchString(url) || ssoURLPatternNew.MatchString(url)
 }
 
 func EnsureConfigExists() error {
@@ -89,7 +90,7 @@ func InitializeConfig() error {
 		if validateSSOURL(ssoStartURL) {
 			break
 		}
-		fmt.Printf("Invalid SSO URL format. Expected: https://your-org.awsapps.com/start\n")
+		fmt.Printf("Invalid SSO URL format. Expected: https://your-org.awsapps.com/start or https://identitycenter.amazonaws.com/ssoins-xxxxxxxx\n")
 	}
 
 	// Get SSO Region

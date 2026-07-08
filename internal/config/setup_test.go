@@ -167,16 +167,24 @@ func TestValidateSSOURL(t *testing.T) {
 		url   string
 		valid bool
 	}{
+		// Legacy format
 		{"https://myorg.awsapps.com/start", true},
 		{"https://my-org.awsapps.com/start", true},
 		{"https://test123.awsapps.com/start/", true}, // trailing slash
 		{"https://myorg.awsapps.com/start/extra", false},
-		{"http://myorg.awsapps.com/start", false},    // http not https
-		{"https://myorg.amazonaws.com/start", false}, // wrong domain
-		{"https://my_org.awsapps.com/start", false},  // underscore not allowed
-		{"myorg.awsapps.com/start", false},           // missing https
+		{"http://myorg.awsapps.com/start", false},   // http not https
+		{"https://my_org.awsapps.com/start", false}, // underscore not allowed
+		{"myorg.awsapps.com/start", false},          // missing https
 		{"", false},
 		{"https://.awsapps.com/start", false}, // empty subdomain
+		// New Identity Center format
+		{"https://identitycenter.amazonaws.com/ssoins-82592fd9e404d1de", true},
+		{"https://identitycenter.amazonaws.com/ssoins-abc123", true},
+		{"https://identitycenter.amazonaws.com/ssoins-82592fd9e404d1de/", true}, // trailing slash
+		{"http://identitycenter.amazonaws.com/ssoins-82592fd9e404d1de", false},  // http not https
+		{"https://identitycenter.amazonaws.com/ssoins-", false},                 // empty instance id
+		{"https://identitycenter.amazonaws.com/invalid-82592fd9e404d1de", false}, // wrong prefix
+		{"https://other.amazonaws.com/ssoins-82592fd9e404d1de", false},          // wrong subdomain
 	}
 
 	for _, tt := range tests {
