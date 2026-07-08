@@ -132,14 +132,9 @@ func (c *CredentialsManager) Authenticate(ctx context.Context, startURL, ssoRegi
 		return fmt.Errorf("failed to start device authorization: %v", err)
 	}
 
-	// Open browser
-	fmt.Printf("Opening browser to: %s\n", *deviceResp.VerificationUriComplete)
-	fmt.Printf("If browser doesn't open, visit: %s\n", *deviceResp.VerificationUriComplete)
+	// Print URL for manual copy-paste
+	fmt.Printf("Visit this URL to authenticate: %s\n", *deviceResp.VerificationUriComplete)
 	fmt.Printf("And enter code: %s\n", *deviceResp.UserCode)
-
-	if err := openBrowser(*deviceResp.VerificationUriComplete); err != nil {
-		fmt.Printf("Failed to open browser: %v\n", err)
-	}
 
 	// Poll for token with timeout
 	timeoutMinutes := int(deviceResp.ExpiresIn / 60)
