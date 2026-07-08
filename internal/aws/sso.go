@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 
@@ -293,5 +294,14 @@ func (s *SSOManager) handleAccountRoleSelection(ctx context.Context, accessToken
 	fmt.Printf("  export AWSC_PROFILE=%s\n", profileName)
 	fmt.Printf("To use it with the AWS CLI:\n")
 	fmt.Printf("  aws --profile %s <command>\n", profileName)
+
+	// Copy export commands to clipboard
+	exportCmds := fmt.Sprintf("export AWS_PROFILE=%s\nexport AWS_REGION=%s", profileName, viper.GetString("default_region"))
+	clipCmd := exec.Command("xclip", "-selection", "clipboard")
+	clipCmd.Stdin = strings.NewReader(exportCmds)
+	if err := clipCmd.Run(); err == nil {
+		fmt.Printf("\nExport commands copied to clipboard.\n")
+	}
+
 	return nil
 }
